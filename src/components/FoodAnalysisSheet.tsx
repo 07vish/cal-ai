@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { FoodItem, MealType } from '../types';
-import { X, Check, Beef, Wheat, Droplets, Sparkles, Scale, HeartHandshake } from 'lucide-react';
+import { FOOD_DATABASE, profileToFoodItem } from '../services/aiVisionClassifier';
+import { X, Check, Beef, Wheat, Droplets, Sparkles, Scale, HeartHandshake, Edit3 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
 interface FoodAnalysisSheetProps {
@@ -18,22 +19,44 @@ export const FoodAnalysisSheet: React.FC<FoodAnalysisSheetProps> = ({
   onLogMeal,
   isDarkMode = true,
 }) => {
+  const [currentFood, setCurrentFood] = useState<FoodItem>(foodItem);
   const [portion, setPortion] = useState<number>(1.0);
   const [selectedMeal, setSelectedMeal] = useState<MealType>('lunch');
+  const [showDishPicker, setShowDishPicker] = useState<boolean>(false);
+  const [searchTerm, setSearchTerm] = useState<string>('');
+
+  useEffect(() => {
+    setCurrentFood(foodItem);
+    setPortion(1.0);
+    setShowDishPicker(false);
+  }, [foodItem]);
 
   if (!isOpen) return null;
 
   // Compute scaled values
-  const currentCalories = Math.round(foodItem.calories * portion);
-  const currentProtein = +(foodItem.protein * portion).toFixed(1);
-  const currentCarbs = +(foodItem.carbs * portion).toFixed(1);
-  const currentFat = +(foodItem.fat * portion).toFixed(1);
-  const currentFiber = +(foodItem.fiber * portion).toFixed(1);
-  const currentSodium = Math.round(foodItem.sodium * portion);
-  const currentWeightGrams = Math.round(foodItem.servingWeightGrams * portion);
+  const currentCalories = Math.round(currentFood.calories * portion);
+  const currentProtein = +(currentFood.protein * portion).toFixed(1);
+  const currentCarbs = +(currentFood.carbs * portion).toFixed(1);
+  const currentFat = +(currentFood.fat * portion).toFixed(1);
+  const currentFiber = +(currentFood.fiber * portion).toFixed(1);
+  const currentSodium = Math.round(currentFood.sodium * portion);
+  const currentWeightGrams = Math.round(currentFood.servingWeightGrams * portion);
+
+  const handleSelectAlternativeDish = (key: string) => {
+    const profile = FOOD_DATABASE[key];
+    if (profile) {
+      const updated = profileToFoodItem(
+        profile,
+        0.99,
+        currentFood.imageUrl || '',
+        profile.name
+      );
+      setCurrentFood(updated);
+      setShowDishPicker(false);
+    }
+  };
 
   const handleConfirm = () => {
-    // Fire celebratory Apple Health rings confetti!
     confetti({
       particleCount: 55,
       spread: 60,
@@ -41,7 +64,7 @@ export const FoodAnalysisSheet: React.FC<FoodAnalysisSheetProps> = ({
       colors: ['#FA114F', '#BAFF1A', '#00D2FF', '#FF9500'],
     });
 
-    onLogMeal(foodItem, portion, selectedMeal);
+    onLogMeal(currentFood, portion, selectedMeal);
     onClose();
   };
 
@@ -53,6 +76,11 @@ export const FoodAnalysisSheet: React.FC<FoodAnalysisSheetProps> = ({
       default: return 'bg-rose-500/20 text-rose-400 border-rose-500/30';
     }
   };
+
+  const filteredDishes = Object.entries(FOOD_DATABASE).filter(([key, profile]) =>
+    key.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    profile.name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm transition-opacity animate-in fade-in">
@@ -67,40 +95,81 @@ export const FoodAnalysisSheet: React.FC<FoodAnalysisSheetProps> = ({
         <div className="w-12 h-1.5 bg-neutral-500/40 rounded-full mx-auto mb-4" />
 
         {/* Top Header */}
-        <div className="flex items-start justify-between mb-4">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
+        <div className="flex items-start justify-between mb-3">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
               <span className="text-[11px] font-semibold uppercase tracking-wider text-apple-gray1">
-                {foodItem.cuisine}
+                {currentFood.cuisine}
               </span>
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${getHealthGradeColor(foodItem.healthGrade)}`}>
-                Nutri-Score {foodItem.healthGrade}
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${getHealthGradeColor(currentFood.healthGrade)}`}>
+                Nutri-Score {currentFood.healthGrade}
               </span>
               <span className="text-[10px] font-medium bg-white/10 text-neutral-300 px-2 py-0.5 rounded-full flex items-center gap-1">
                 <Sparkles className="w-2.5 h-2.5 text-apple-green" />
-                {Math.round(foodItem.confidence * 100)}% Match
+                {Math.round(currentFood.confidence * 100)}% Confidence
               </span>
             </div>
-            <h2 className="text-2xl font-bold tracking-tight">{foodItem.name}</h2>
+
+            <div className="flex items-center gap-2">
+              <h2 className="text-2xl font-bold tracking-tight">{currentFood.name}</h2>
+              <button
+                onClick={() => setShowDishPicker(!showDishPicker)}
+                className="p-1 rounded-full text-neutral-400 hover:text-white bg-white/5 hover:bg-white/15 transition-colors"
+                title="Change or refine dish"
+              >
+                <Edit3 className="w-4 h-4" />
+              </button>
+            </div>
           </div>
+
           <button
             onClick={onClose}
-            className="p-2 rounded-full bg-neutral-800/60 hover:bg-neutral-700/60 text-neutral-400 hover:text-white transition-colors"
+            className="p-2 rounded-full bg-neutral-800/60 hover:bg-neutral-700/60 text-neutral-400 hover:text-white transition-colors ml-2"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Food Image with bounding badges */}
-        {foodItem.imageUrl && (
+        {/* Quick Food Search / Override Drawer */}
+        {showDishPicker && (
+          <div className="mb-4 p-3 rounded-2xl bg-white/10 border border-white/10 animate-in fade-in">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-neutral-300">Choose Specific Food Item:</span>
+              <button onClick={() => setShowDishPicker(false)} className="text-[11px] text-neutral-400">
+                Cancel
+              </button>
+            </div>
+            <input
+              type="text"
+              placeholder="Search banana, pizza, egg, chicken, rice..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full px-3 py-1.5 rounded-xl bg-black/50 border border-white/10 text-xs mb-2 text-white focus:outline-none"
+            />
+            <div className="max-h-36 overflow-y-auto no-scrollbar flex flex-wrap gap-1.5">
+              {filteredDishes.map(([key, profile]) => (
+                <button
+                  key={key}
+                  onClick={() => handleSelectAlternativeDish(key)}
+                  className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/25 text-xs text-neutral-200 transition-colors flex items-center gap-1"
+                >
+                  <span>{profile.name}</span>
+                  <span className="text-apple-ringCalories text-[10px] font-bold">({profile.calories} kcal)</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Real Food Image Captured with Bounding Badges */}
+        {currentFood.imageUrl && (
           <div className="relative w-full h-48 rounded-2xl overflow-hidden mb-5 border border-white/10 shadow-lg">
             <img
-              src={foodItem.imageUrl}
-              alt={foodItem.name}
+              src={currentFood.imageUrl}
+              alt={currentFood.name}
               className="w-full h-full object-cover"
             />
-            {/* Visual AI Detection Markers */}
-            {foodItem.boundingBoxes?.map((box, idx) => (
+            {currentFood.boundingBoxes?.map((box, idx) => (
               <div
                 key={idx}
                 className="absolute border-2 border-apple-green bg-apple-green/10 rounded-lg pointer-events-none transition-all flex flex-col justify-start p-1"
@@ -176,15 +245,15 @@ export const FoodAnalysisSheet: React.FC<FoodAnalysisSheetProps> = ({
             </div>
           </div>
 
-          {/* Micronutrients row */}
+          {/* Micronutrients */}
           <div className="mt-3 pt-3 border-t border-white/5 flex items-center justify-around text-[11px] text-neutral-400">
             <span>Fiber: <strong className="text-white">{currentFiber}g</strong></span>
             <span>Sodium: <strong className="text-white">{currentSodium}mg</strong></span>
-            <span>GI: <strong className="text-white">{foodItem.glycemicIndex}</strong></span>
+            <span>GI: <strong className="text-white">{currentFood.glycemicIndex}</strong></span>
           </div>
         </div>
 
-        {/* Portion Sizing Slider (Apple Style) */}
+        {/* Portion Sizing Slider */}
         <div className="mb-5">
           <div className="flex justify-between items-center mb-2">
             <label className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">
@@ -235,15 +304,15 @@ export const FoodAnalysisSheet: React.FC<FoodAnalysisSheetProps> = ({
           </div>
         </div>
 
-        {/* Identified Ingredients Breakdown */}
-        {foodItem.ingredients && foodItem.ingredients.length > 0 && (
+        {/* Identified Ingredients */}
+        {currentFood.ingredients && currentFood.ingredients.length > 0 && (
           <div className="mb-6">
             <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
               <HeartHandshake className="w-3.5 h-3.5" />
-              Detected Ingredients Breakdown
+              Nutritional Breakdown
             </h4>
             <div className="space-y-1.5">
-              {foodItem.ingredients.map((ing, idx) => (
+              {currentFood.ingredients.map((ing, idx) => (
                 <div
                   key={idx}
                   className="flex items-center justify-between text-xs py-2 px-3 rounded-xl bg-white/5 border border-white/5"

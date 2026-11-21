@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import type { FoodItem, PresetFoodSample } from '../types';
 import { PRESET_FOOD_SAMPLES, analyzeFoodImage } from '../services/foodRecognition';
 import {
@@ -10,7 +10,9 @@ import {
   Image as ImageIcon,
   Sparkles,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Video,
+  Play
 } from 'lucide-react';
 
 interface CameraScannerProps {
@@ -32,86 +34,134 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
   const [flashOn, setFlashOn] = useState<boolean>(false);
   const [gridOn, setGridOn] = useState<boolean>(true);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
-  const [scanStatus, setScanStatus] = useState<string>('Align food inside the frame');
+  const [scanStatus, setScanStatus] = useState<string>('Point at any food to detect');
   const [selectedPreset, setSelectedPreset] = useState<PresetFoodSample | null>(null);
+  const [capturedSnapshot, setCapturedSnapshot] = useState<string | null>(null);
 
-  // Initialize camera stream
-  useEffect(() => {
-    let stream: MediaStream | null = null;
+  // Initialize camera stream with robust fallbacks
+  const startCamera = useCallback(async () => {
+    setCameraError(null);
 
-    const startCamera = async () => {
-      try {
-        setCameraError(null);
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: false
-        });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-          setStreamActive(true);
-        }
-      } catch (err: unknown) {
-        console.warn('Camera stream could not start (normal in non-HTTPS / test environments):', err);
-        setCameraError('Camera access unavailable. Use photo upload or test food samples below!');
-        setStreamActive(false);
+    // Stop any existing stream tracks
+    if (videoRef.current && videoRef.current.srcObject) {
+      const existing = videoRef.current.srcObject as MediaStream;
+      existing.getTracks().forEach(t => t.stop());
+      videoRef.current.srcObject = null;
+    }
+
+    const constraintOptions: MediaStreamConstraints[] = [
+      // 1. Try preferred facing mode with ideal resolution
+      {
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      },
+      // 2. Try simple facing mode
+      {
+        video: { facingMode: facingMode },
+        audio: false
+      },
+      // 3. Universal fallback: any video source (works on all laptops/webcams/phones)
+      {
+        video: true,
+        audio: false
       }
-    };
+    ];
 
+    let mediaStream: MediaStream | null = null;
+    let lastError: unknown = null;
+
+    for (const constraints of constraintOptions) {
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (mediaStream) break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (mediaStream && videoRef.current) {
+      videoRef.current.srcObject = mediaStream;
+      try {
+        await videoRef.current.play();
+        setStreamActive(true);
+        setCameraError(null);
+      } catch (playErr) {
+        console.warn('Video play interrupted or blocked:', playErr);
+        setStreamActive(true);
+      }
+    } else {
+      console.warn('All camera constraints failed:', lastError);
+      setCameraError('Camera access blocked or not supported on this browser. Click "Enable Camera" or upload a photo.');
+      setStreamActive(false);
+    }
+  }, [facingMode]);
+
+  useEffect(() => {
     startCamera();
 
     return () => {
-      if (stream) {
+      if (videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
         stream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [facingMode]);
+  }, [startCamera]);
 
-  // Flip camera
+  // Flip camera between front and back
   const handleFlipCamera = () => {
     setFacingMode(prev => (prev === 'environment' ? 'user' : 'environment'));
   };
 
-  // Trigger Capture & Scan
+  // Trigger Real Capture & Scan
   const handleCapture = async () => {
     if (isAnalyzing) return;
     setIsAnalyzing(true);
-    setScanStatus('Acquiring image & identifying macros...');
+    setScanStatus('Capturing frame...');
 
     try {
-      if (streamActive && videoRef.current) {
-        // Capture frame from video stream
+      let imageToAnalyze: string | null = null;
+
+      // 1. If live video stream is active, grab the EXACT frame from video
+      if (videoRef.current && videoRef.current.videoWidth > 0) {
+        const video = videoRef.current;
         const canvas = document.createElement('canvas');
-        canvas.width = videoRef.current.videoWidth || 640;
-        canvas.height = videoRef.current.videoHeight || 480;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          imageToAnalyze = canvas.toDataURL('image/jpeg', 0.9);
+          setCapturedSnapshot(imageToAnalyze);
+        }
+      }
 
-          setScanStatus('Running neural vision & macro estimation...');
-          setTimeout(async () => {
-            const detected = await analyzeFoodImage(dataUrl, geminiApiKey);
-            setIsAnalyzing(false);
-            onFoodDetected(detected);
-          }, 1200);
+      // 2. If no video frame (e.g. camera off), use preset or prompt
+      if (!imageToAnalyze) {
+        if (selectedPreset) {
+          imageToAnalyze = selectedPreset.imageUrl;
+        } else {
+          // If no camera and no preset, prompt user to pick photo
+          setIsAnalyzing(false);
+          fileInputRef.current?.click();
           return;
         }
       }
 
-      // If no live webcam stream, use default or active preset sample
-      const sample = selectedPreset || PRESET_FOOD_SAMPLES[0];
-      setScanStatus(`Detecting ${sample.title}...`);
-      setTimeout(async () => {
-        const detected = await analyzeFoodImage(sample.imageUrl, geminiApiKey);
-        setIsAnalyzing(false);
-        onFoodDetected(detected);
-      }, 1200);
+      setScanStatus('AI Vision analyzing calories & macros...');
+      const detected = await analyzeFoodImage(imageToAnalyze, geminiApiKey);
+      setIsAnalyzing(false);
+      setCapturedSnapshot(null);
+      onFoodDetected(detected);
 
     } catch (err) {
       console.error(err);
       setIsAnalyzing(false);
-      setScanStatus('Detection error. Try again.');
+      setScanStatus('Analysis error. Try again.');
+      setCapturedSnapshot(null);
     }
   };
 
@@ -121,31 +171,39 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
     if (!file) return;
 
     setIsAnalyzing(true);
-    setScanStatus('Reading image data...');
+    setScanStatus('Reading photo...');
 
     const reader = new FileReader();
     reader.onload = async (event) => {
       const dataUrl = event.target?.result as string;
-      setScanStatus('Analyzing food item & calculating calories...');
-      setTimeout(async () => {
+      setCapturedSnapshot(dataUrl);
+      setScanStatus('AI scanning calories, protein & macros...');
+      try {
         const detected = await analyzeFoodImage(dataUrl, geminiApiKey);
         setIsAnalyzing(false);
+        setCapturedSnapshot(null);
         onFoodDetected(detected);
-      }, 1200);
+      } catch (err) {
+        console.error(err);
+        setIsAnalyzing(false);
+        setCapturedSnapshot(null);
+      }
     };
     reader.readAsDataURL(file);
   };
 
-  // Quick Preset Sample Selection
+  // Preset Sample Click
   const handleSelectPreset = (preset: PresetFoodSample) => {
     setSelectedPreset(preset);
     setIsAnalyzing(true);
+    setCapturedSnapshot(preset.imageUrl);
     setScanStatus(`Scanning ${preset.foodData.name}...`);
     setTimeout(async () => {
       const detected = await analyzeFoodImage(preset.imageUrl, geminiApiKey);
       setIsAnalyzing(false);
+      setCapturedSnapshot(null);
       onFoodDetected(detected);
-    }, 1100);
+    }, 900);
   };
 
   return (
@@ -169,10 +227,15 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
               <Sparkles className="w-3.5 h-3.5 text-apple-green animate-spin" />
               <span className="text-apple-green font-semibold">{scanStatus}</span>
             </>
+          ) : streamActive ? (
+            <>
+              <CheckCircle2 className="w-3.5 h-3.5 text-apple-green" />
+              <span className="text-neutral-200">Live Camera Ready</span>
+            </>
           ) : (
             <>
-              <CheckCircle2 className="w-3.5 h-3.5 text-apple-ringProtein" />
-              <span className="text-neutral-200">AI Vision Live</span>
+              <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+              <span className="text-amber-200">Camera Paused</span>
             </>
           )}
         </div>
@@ -198,45 +261,57 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
       </div>
 
       {/* Main Viewfinder Area */}
-      <div className="relative flex-1 flex items-center justify-center overflow-hidden">
+      <div className="relative flex-1 flex items-center justify-center overflow-hidden bg-neutral-950">
         {/* Flash Simulation Overlay */}
         {flashOn && (
-          <div className="absolute inset-0 bg-white/20 pointer-events-none z-20" />
+          <div className="absolute inset-0 bg-white/30 pointer-events-none z-20" />
         )}
 
-        {/* Live Video Feed OR Mock Fallback Viewfinder */}
-        {streamActive ? (
-          <video
-            ref={videoRef}
-            playsInline
-            muted
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-        ) : (
-          <div className="relative w-full h-full flex flex-col items-center justify-center p-6 text-center bg-neutral-950">
-            {selectedPreset ? (
-              <img
-                src={selectedPreset.imageUrl}
-                alt={selectedPreset.title}
-                className="absolute inset-0 w-full h-full object-cover opacity-80"
-              />
-            ) : (
-              <img
-                src="https://images.unsplash.com/photo-1546069901-ba9599a7e63c?q=80&w=1000&auto=format&fit=crop"
-                alt="Delicious meal"
-                className="absolute inset-0 w-full h-full object-cover opacity-75"
-              />
-            )}
-            <div className="absolute inset-0 bg-gradient-to-t from-black via-black/30 to-black/60" />
+        {/* The Live Video Element is ALWAYS mounted so srcObject is never lost */}
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
+            streamActive && !capturedSnapshot ? 'opacity-100 z-0' : 'opacity-0 -z-10'
+          }`}
+        />
 
-            {cameraError && (
-              <div className="relative z-10 max-w-xs mb-32 p-3 rounded-2xl bg-black/75 backdrop-blur-md border border-white/10 text-xs text-neutral-300 flex items-center gap-2">
-                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
-                <p className="text-left leading-relaxed">
-                  Ready to detect food! Tap <strong>Shutter</strong>, choose a preset food item below, or upload a photo from your library.
-                </p>
-              </div>
-            )}
+        {/* Freeze frame snapshot if currently analyzing a picture */}
+        {capturedSnapshot && (
+          <img
+            src={capturedSnapshot}
+            alt="Captured meal"
+            className="absolute inset-0 w-full h-full object-cover z-10"
+          />
+        )}
+
+        {/* If Camera is NOT active and no snapshot, show camera enable UI */}
+        {!streamActive && !capturedSnapshot && (
+          <div className="relative z-10 flex flex-col items-center justify-center p-6 text-center max-w-xs">
+            <div className="w-16 h-16 rounded-3xl bg-neutral-900 border border-white/10 flex items-center justify-center mb-4 text-apple-green shadow-xl">
+              <Video className="w-8 h-8" />
+            </div>
+            <h3 className="text-base font-bold mb-1">Camera Standby</h3>
+            <p className="text-xs text-neutral-400 mb-4 leading-relaxed">
+              {cameraError || 'Allow camera access to scan your food in real-time, or upload a photo from your gallery.'}
+            </p>
+            <div className="flex flex-col gap-2 w-full">
+              <button
+                onClick={startCamera}
+                className="w-full py-2.5 rounded-2xl bg-apple-green text-black font-bold text-xs flex items-center justify-center gap-2 hover:bg-emerald-400 transition-colors shadow-lg"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                <span>Turn On Camera</span>
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full py-2 rounded-2xl bg-white/10 border border-white/10 text-white font-semibold text-xs hover:bg-white/15 transition-colors"
+              >
+                Upload Food Photo Instead
+              </button>
+            </div>
           </div>
         )}
 
@@ -250,7 +325,7 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
             <div className="border-r border-b border-white/10" />
             <div className="border-b border-white/10" />
             <div className="border-r border-white/10" />
-            <div className="border-r border-white/10" />
+            <div className="border-r border-b border-white/10" />
             <div />
           </div>
         )}
@@ -275,14 +350,14 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
         </div>
       </div>
 
-      {/* Preset Food Bar: Allows 1-Click Instant Testing */}
-      <div className="relative z-30 px-4 pt-2 pb-2 bg-gradient-to-t from-black via-black/80 to-transparent">
+      {/* Preset Food Bar: Quick testing dishes */}
+      <div className="relative z-30 px-4 pt-2 pb-2 bg-gradient-to-t from-black via-black/85 to-transparent">
         <div className="flex items-center justify-between mb-1.5 px-1">
           <span className="text-[11px] font-bold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
             <Sparkles className="w-3 h-3 text-apple-ringProtein" />
-            Tap to Test High-Accuracy Dishes
+            Quick Test Dishes
           </span>
-          <span className="text-[10px] text-neutral-400">8 sample plates</span>
+          <span className="text-[10px] text-neutral-400">or scan real food</span>
         </div>
 
         <div className="flex gap-2.5 overflow-x-auto no-scrollbar py-1">
@@ -331,7 +406,7 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
           <span className="text-[10px] font-medium">Library</span>
         </button>
 
-        {/* Big Apple Shutter Button */}
+        {/* Big Apple Shutter Button: snaps the real camera frame */}
         <div className="relative flex items-center justify-center">
           <button
             onClick={handleCapture}
@@ -345,13 +420,21 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
           </button>
         </div>
 
-        {/* Quick Help / Info */}
-        <div className="w-12 flex flex-col items-center gap-1 text-neutral-400">
-          <div className="w-12 h-12 rounded-2xl bg-neutral-900 border border-white/15 flex items-center justify-center text-apple-green">
+        {/* Camera Start / Switch Action */}
+        <button
+          onClick={startCamera}
+          className="flex flex-col items-center gap-1 text-neutral-400 hover:text-white transition-colors"
+          title="Restart Camera"
+        >
+          <div className={`w-12 h-12 rounded-2xl border flex items-center justify-center transition-colors ${
+            streamActive ? 'bg-neutral-900 border-white/15 text-apple-green' : 'bg-apple-green/20 border-apple-green text-apple-green'
+          }`}>
             <Camera className="w-6 h-6" />
           </div>
-          <span className="text-[10px] font-medium text-neutral-400">Scan</span>
-        </div>
+          <span className="text-[10px] font-medium">
+            {streamActive ? 'Camera' : 'Start'}
+          </span>
+        </button>
       </div>
     </div>
   );
